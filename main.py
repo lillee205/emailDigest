@@ -11,8 +11,6 @@ import base64
 
 # If modifying these scopes, delete the file token.json.
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
-EMAILS = ["hello@smart-shopping.thredup.com", "news@omocat.com",
-          "messages+5jv970x069v5s@squaremktg.com", "rtuynman@ryman.org"]
 # Fetches service.users().messages() as infrequently as possible by initializing
 # as global variable
 msgs = None
@@ -45,20 +43,20 @@ def main():
         service = build('gmail', 'v1', credentials=creds)
         msgs = service.users().messages()
 
-        # Only retrieve emails from senders in EMAILS and from certain time range
+        # Only retrieve emails from the label Unwanted/For Digest
+        # and from 7 days ago to now.
         currDate = date.today()
         tmrw = (currDate + timedelta(days = 1)).strftime("%y/%m/%d")
-        daysBefore = (currDate - timedelta(days=60)).strftime("%y/%m/%d")
-        query = " ".join(["from:" + _ + " OR " for _ in EMAILS])[:-3] + f"before:{tmrw} after:{daysBefore}"
-        print(query)
+        daysBefore = (currDate - timedelta(days=7)).strftime("%y/%m/%d")
+        query = f"label:unwanted-for-digest before:{tmrw} after:{daysBefore}"
         results = msgs.list(userId='me', q = query).execute()
         
         # if there aren't any emails to be compiled, stop
         if results['resultSizeEstimate'] == 0:
-            print("no messages")
+            print("There are no emails")
             return
-        createEmails(results['messages'])
-
+        digestMsg = createEmails(results['messages'])
+        sendEmail(digestMsg)
     except HttpError as error:
         print(f'An error occurred: {error}')
 
@@ -81,22 +79,44 @@ def createEmails(emails):
         # extract body of email
         content = msgs.get(userId = 'me', id = mail['id'], format =
     "full").execute()['payload']
-        if 'data' in content["body"]:
-            print(content)
-            subject = [h["value"] for h in content["headers"] if h["name"] ==
-    "Subject"][0]
-            sender = [h["value"] for h in content["headers"] if h["name"] ==
-    "Reply-To"][0]
-            sender = sender[:sender.index("<")]
-            digestHeader += f"<li><a href='#{count}'>{sender}: {subject}</a></li>"
+        data = ""
+        # if multipart, then extract html text
+        if content["mimeType"] == "multipart/alternative":
+            for part in content["parts"]:
+                if part["mimeType"] == "text/html":
+                    data = part["body"]["data"]
+                    break
+        # otherwise, it doesn't have any parts so
+        # can read data directly
+        else:
+            data  = content["body"]["data"]
+        headers = content["headers"]
+        subject, sender, dateSent  = "", "", ""
+        for h in headers:
+            name = h["name"]
+            val = h["value"]
+            if name == "Subject":
+                subject = val
+            elif name == "Reply-To":
+                sender = val#[:val.index("<")]
+            elif name == "Date":
+                dateSent = val
+        digestHeader += f"<li><a href='#{count}'>{sender}: {subject}</a></li>\n"
             
             # add header that will be used for navigation via table of contents
-            digest += f"<h2><a name={count}>{sender}: {subject}</a></h2>\n"
-            digest += f"<h3><a href='#toc'>return to toc</a></h3>"
-            # add contents of email to digest
-            digest += base64.urlsafe_b64decode(content['body']['data'].encode("ASCII")).decode("utf-8")
-            count += 1
-    
+        digest += f"""
+            <h2 style = 'display:inline'><a name={count}>{sender}: {subject}</a></h2>
+            <p style='color:gray'>from: {dateSent}</p>
+            <h3><a href='#toc'>return to toc</a></h3>
+        """
+        # add contents of email to digest
+        digest += base64.urlsafe_b64decode(
+            data.encode("ASCII")).decode("utf-8")
+
+            # move email to trash
+            #msgs.trash(userId = 'me', id = mail['id']).execute()
+        count += 1
+            
     digestHeader += """
     </ol>
     """
@@ -109,12 +129,14 @@ def createEmails(emails):
     message["To"] = "lglee@g.hmc.edu"
     message["From"] = "leelillian205@gmail.com"
 
+    # Formatting subject of email
     currDate = date.today()
-    dayBefore = (currDate + timedelta(days = 1)).strftime("%y/%m/%d")
-    weekBefore = (currDate - timedelta(days=60)).strftime("%y/%m/%d")
-    message["Subject"] = f"Weekly Digest {daysBefore}~{weekBefore}"
+    dayBefore = (currDate + timedelta(days = 1)).strftime("%m/%d/%y")
+    weekBefore = (currDate - timedelta(days=60)).strftime("%m/%d/%y")
+    message["Subject"] = f"Weekly Digest {dayBefore}~{weekBefore}"
+
     message.add_alternative(digest, subtype="html")
-    #sendEmail(message)
+    return message
 
 def sendEmail(message):
     """ Takes EmailMessage and sends it to the receiver """
@@ -122,6 +144,7 @@ def sendEmail(message):
     create_message = {'raw': encoded_message}
     send_message = msgs.send(userId = "me", body = create_message).execute()
     print("Email has been sent!")
-    
+
+
 if __name__ == '__main__':
     main()
